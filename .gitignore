@@ -1,0 +1,20 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# venv
+venv/
+.venv/
+
+# OS
+.DS_Store
+
+# AI pipeline generated / cache (보통 원격에 올리면 불필요/용량 큼)
+data/generated/
+data/vectorstore/
+data/**/faiss_index
+data/**/metadata.json

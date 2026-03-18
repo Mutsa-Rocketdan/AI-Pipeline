@@ -1,0 +1,8 @@
+openai
+faiss-cpu
+streamlit
+pandas
+python-dotenv
+pyyaml
+tiktoken
+sentence-transformers

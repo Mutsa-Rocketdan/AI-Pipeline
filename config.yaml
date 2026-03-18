@@ -1,0 +1,42 @@
+openai:
+  model: "gpt-4o"
+  embedding_model: "text-embedding-3-small"
+  temperature: 0.7
+  max_tokens: 4096
+
+# 벡터DB 임베딩: "openai" (API 사용) | "local" (API 없이 로컬 모델, 할당량 초과 시 사용)
+embedding_backend: "openai"
+local_embedding_model: "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+preprocessing:
+  chunk_size: 600
+  chunk_overlap: 100
+  segment_gap_seconds: 30
+
+vectorstore:
+  index_path: "data/vectorstore/faiss_index"
+  metadata_path: "data/vectorstore/metadata.json"
+  top_k: 8
+
+quiz:
+  default_count: 10
+  min_count: 5
+  max_count: 20
+  types:
+    - multiple_choice
+    - short_answer
+    - fill_blank
+    - code
+  difficulties:
+    - easy
+    - medium
+    - hard
+
+guide:
+  summary_max_tokens: 2000
+  concepts_max: 15
+
+paths:
+  scripts_dir: "강의 스크립트"
+  curriculum_csv: "강의 커리큘럼.csv"
+  generated_dir: "data/generated"
