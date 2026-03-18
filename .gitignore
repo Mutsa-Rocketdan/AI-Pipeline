@@ -18,3 +18,8 @@ data/generated/
 data/vectorstore/
 data/**/faiss_index
 data/**/metadata.json
+강의 스크립트/
+강의 커리큘럼.csv
+강의스크립트_데이터분석.md
+기존 퀴즈 샘플.pdf
+PLAN.md

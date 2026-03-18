@@ -89,7 +89,7 @@ OPENAI_API_KEY=sk-your-openai-api-key-here
 ## 6. Streamlit 앱 실행
 
 ```bash
-streamlit run app.py
+streamlit run streamlit_app.py
 ```
 
 브라우저가 자동으로 열리지 않으면 터미널에 표시되는 주소(예: `http://localhost:8501`)로 접속합니다.
