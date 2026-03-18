@@ -12,7 +12,7 @@ import numpy as np
 from openai import APIError
 
 from .preprocessing import Chunk, process_all_scripts
-from .common import get_openai_client, load_config
+from .common import get_openai_client, load_config, md5_hex
 
 # FAISS C++ 라이브러리는 Windows에서 유니코드 경로를 지원하지 않음.
 # 프로젝트 경로에 한글이 있으면 ASCII만 있는 임시 디렉터리에 저장.
@@ -129,7 +129,12 @@ def build_vectorstore(chunks: list[Chunk] | None = None, force_rebuild: bool = F
         chunks = process_all_scripts()
 
     texts = [c.text for c in chunks]
-    metadata_list = [c.to_dict() for c in chunks]
+    # chunk_hash는 업서트(증분 업데이트)에서 중복 삽입을 막기 위한 키로 사용합니다.
+    metadata_list = []
+    for c in chunks:
+        d = c.to_dict()
+        d["chunk_hash"] = md5_hex(d.get("text", ""))
+        metadata_list.append(d)
 
     config = load_config()
     backend = config.get("embedding_backend", "openai")
@@ -174,6 +179,153 @@ def build_vectorstore(chunks: list[Chunk] | None = None, force_rebuild: bool = F
         location_file.write_text(str(index_path.parent), encoding="utf-8")
 
     return index, metadata_list
+
+
+def upsert_vectorstore_from_chunks(
+    new_chunks: list[Chunk],
+    *,
+    force_rebuild: bool = False,
+) -> dict:
+    """
+    기존 FAISS 벡터DB에 새 청크를 증분(add-only)으로 추가합니다.
+
+    - dedupe 키: `chunk_hash = md5(text)` (metadata에 저장)
+    - embedding_backend/임베딩 차원(dim)이 기존 인덱스와 다르면 오류를 발생시킵니다.
+    """
+    config = load_config()
+    backend = config.get("embedding_backend", "openai")
+
+    if force_rebuild:
+        # "강의 추가 후 불일치 가능성"을 안전하게 제거하려면 전체 재구축이 가장 확실합니다.
+        build_vectorstore(force_rebuild=True)
+        return {
+            "status": "rebuild",
+            "embedding_backend": backend,
+            "added_chunks": None,
+            "skipped_chunks": None,
+            "total_new_chunks": len(new_chunks),
+        }
+
+    if not vectorstore_exists():
+        # 기존 DB가 없으면, 들어온 청크만으로 새 벡터스토어를 생성합니다.
+        index_path, metadata_path, location_file = _get_vectorstore_paths()
+
+        texts = [c.text for c in new_chunks]
+        metadata_list: list[dict] = []
+        for c in new_chunks:
+            d = c.to_dict()
+            d["chunk_hash"] = md5_hex(d.get("text", ""))
+            metadata_list.append(d)
+
+        if backend == "local":
+            model_name = config.get(
+                "local_embedding_model",
+                "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            )
+            embeddings = create_embeddings_local(texts, model_name=model_name)
+        else:
+            embedding_model = config["openai"]["embedding_model"]
+            embeddings = create_embeddings_openai(texts, model=embedding_model)
+
+        faiss.normalize_L2(embeddings)
+        dim = embeddings.shape[1]
+        index = faiss.IndexFlatIP(dim)
+        index.add(embeddings)
+
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(index, str(index_path))
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata_list, f, ensure_ascii=False, indent=2)
+
+        if _path_has_non_ascii(Path(__file__).resolve().parent.parent):
+            location_file.parent.mkdir(parents=True, exist_ok=True)
+            location_file.write_text(str(index_path.parent), encoding="utf-8")
+
+        return {
+            "status": "created",
+            "embedding_backend": backend,
+            "added_chunks": len(metadata_list),
+            "skipped_chunks": 0,
+            "total_new_chunks": len(new_chunks),
+        }
+
+    # 기존 DB가 있는 경우: add-only 업서트
+    index, metadata_list = load_vectorstore()
+    _, metadata_path = _resolve_vectorstore_paths()
+    # index_path는 write_index에 필요하므로 다시 resolve
+    index_path, _ = _resolve_vectorstore_paths()
+
+    existing_hashes: set[str] = set()
+    for m in metadata_list:
+        h = m.get("chunk_hash")
+        if not h:
+            h = md5_hex(m.get("text", ""))
+        existing_hashes.add(h)
+
+    # dedupe 후 새로 추가할 청크만 추립니다.
+    to_add_chunks: list[Chunk] = []
+    to_add_metadata: list[dict] = []
+    for c in new_chunks:
+        h = md5_hex(c.text)
+        if h in existing_hashes:
+            continue
+        existing_hashes.add(h)
+        d = c.to_dict()
+        d["chunk_hash"] = h
+        to_add_chunks.append(c)
+        to_add_metadata.append(d)
+
+    if not to_add_chunks:
+        return {
+            "status": "skipped",
+            "embedding_backend": backend,
+            "added_chunks": 0,
+            "skipped_chunks": len(new_chunks),
+            "total_new_chunks": len(new_chunks),
+        }
+
+    texts = [c.text for c in to_add_chunks]
+    if backend == "local":
+        model_name = config.get(
+            "local_embedding_model",
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        )
+        embeddings = create_embeddings_local(texts, model_name=model_name)
+    else:
+        embedding_model = config["openai"]["embedding_model"]
+        embeddings = create_embeddings_openai(texts, model=embedding_model)
+
+    faiss.normalize_L2(embeddings)
+    dim = embeddings.shape[1]
+    if index.d != dim:
+        raise ValueError(
+            "기존 벡터DB와 임베딩 차원(dim)이 일치하지 않습니다. "
+            "embedding_backend 또는 임베딩 모델이 변경되었을 가능성이 있으니 "
+            "전체 재구축(force_rebuild=True)을 고려하세요."
+        )
+
+    index.add(embeddings)
+
+    # chunk_id는 기존 메타데이터의 최대값 다음부터 이어서 부여합니다.
+    next_chunk_id = max(int(m.get("chunk_id", -1)) for m in metadata_list) + 1
+    for d in to_add_metadata:
+        d["chunk_id"] = next_chunk_id
+        next_chunk_id += 1
+
+    metadata_list.extend(to_add_metadata)
+
+    # 업데이트 저장
+    faiss.write_index(index, str(index_path))
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata_list, f, ensure_ascii=False, indent=2)
+
+    return {
+        "status": "updated",
+        "embedding_backend": backend,
+        "added_chunks": len(to_add_metadata),
+        "skipped_chunks": len(new_chunks) - len(to_add_metadata),
+        "total_new_chunks": len(new_chunks),
+    }
 
 
 def load_vectorstore() -> tuple[faiss.IndexFlatIP, list[dict]]:
