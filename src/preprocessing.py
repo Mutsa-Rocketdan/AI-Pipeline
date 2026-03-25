@@ -22,6 +22,7 @@ class ChunkMetadata:
     learning_goal: str
     session: str = ""
     instructor: str = ""
+    lecture_id: str = ""  # Backend 업로드 강의 UUID (벡터DB 필터용)
 
 
 @dataclass
@@ -41,6 +42,7 @@ class Chunk:
             "learning_goal": self.metadata.learning_goal,
             "session": self.metadata.session,
             "instructor": self.metadata.instructor,
+            "lecture_id": self.metadata.lecture_id,
         }
 
 
@@ -155,6 +157,64 @@ def process_script_file(
 
     metadata = get_metadata_for_date(curriculum_df, date_str)
     parsed = parse_stt_lines(raw_text)
+    segments = segment_by_gap(
+        parsed,
+        gap_seconds=config.get("preprocessing", {}).get("segment_gap_seconds", 30),
+    )
+
+    chunk_size = config.get("preprocessing", {}).get("chunk_size", 600)
+    chunk_overlap = config.get("preprocessing", {}).get("chunk_overlap", 100)
+
+    chunks: list[Chunk] = []
+    for segment in segments:
+        text_chunks = chunk_text(segment, max_tokens=chunk_size, overlap_tokens=chunk_overlap)
+        for tc in text_chunks:
+            chunks.append(Chunk(text=tc, metadata=metadata))
+
+    return chunks
+
+
+def chunks_from_uploaded_lecture_text(
+    raw_text: str,
+    *,
+    lecture_id: str,
+    week: int = 0,
+    subject: str = "",
+    instructor: str = "",
+    session: str = "",
+    date_str: str = "",
+    title: str = "",
+    learning_goal: str = "",
+    config: dict | None = None,
+) -> list[Chunk]:
+    """Backend 업로드 텍스트를 전처리·청킹하여 Chunk 리스트로 반환 (전역 벡터DB 인제스트용).
+
+    `lecture_id`는 메타데이터에 저장되어 RAG 검색 시 해당 강의만 필터링하는 데 사용됩니다.
+    """
+    if config is None:
+        config = load_config()
+
+    if not raw_text or not raw_text.strip():
+        return []
+
+    metadata = ChunkMetadata(
+        date=date_str or "0000-00-00",
+        week=week,
+        subject=subject or "Unknown",
+        content=title or "",
+        learning_goal=learning_goal,
+        session=session,
+        instructor=instructor,
+        lecture_id=lecture_id,
+    )
+
+    parsed = parse_stt_lines(raw_text)
+    if not parsed:
+        for line in raw_text.strip().split("\n"):
+            line = line.strip()
+            if line:
+                parsed.append({"time": 0, "text": line})
+
     segments = segment_by_gap(
         parsed,
         gap_seconds=config.get("preprocessing", {}).get("segment_gap_seconds", 30),

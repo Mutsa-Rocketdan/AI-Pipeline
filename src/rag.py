@@ -27,10 +27,13 @@ def filter_metadata(
     date: str | None = None,
     week: int | None = None,
     subject: str | None = None,
+    lecture_id: str | None = None,
 ) -> list[int]:
     """메타데이터 기준으로 필터링하여 해당 인덱스 반환."""
     indices = []
     for i, meta in enumerate(metadata_list):
+        if lecture_id and meta.get("lecture_id") != lecture_id:
+            continue
         if date and meta.get("date") != date:
             continue
         if week is not None and meta.get("week") != week:
@@ -46,18 +49,32 @@ def search(
     date: str | None = None,
     week: int | None = None,
     subject: str | None = None,
+    lecture_id: str | None = None,
     top_k: int | None = None,
 ) -> list[dict]:
-    """RAG 검색: 메타데이터 필터링 후 유사도 기반 top-k 청크 반환."""
+    """RAG 검색: 메타데이터 필터링 후 유사도 기반 top-k 청크 반환.
+
+    ``lecture_id``가 지정되면 해당 강의로 인제스트된 청크만 검색합니다.
+    일치하는 청크가 없으면 빈 리스트를 반환합니다(전역 DB를 열어두지 않음).
+    """
     config = load_config()
     if top_k is None:
         top_k = config["vectorstore"]["top_k"]
 
     index, metadata_list = _get_vectorstore()
 
-    filtered_indices = filter_metadata(metadata_list, date=date, week=week, subject=subject)
+    filtered_indices = filter_metadata(
+        metadata_list,
+        date=date,
+        week=week,
+        subject=subject,
+        lecture_id=lecture_id,
+    )
 
+    strict = bool(lecture_id or date or week is not None or subject)
     if not filtered_indices:
+        if strict:
+            return []
         filtered_indices = list(range(len(metadata_list)))
 
     query_embedding = create_embeddings([query])
@@ -86,10 +103,11 @@ def get_context_for_generation(
     topic: str,
     date: str | None = None,
     week: int | None = None,
+    lecture_id: str | None = None,
     top_k: int = 8,
 ) -> str:
     """퀴즈/가이드 생성에 사용할 컨텍스트 텍스트 조합."""
-    results = search(query=topic, date=date, week=week, top_k=top_k)
+    results = search(query=topic, date=date, week=week, lecture_id=lecture_id, top_k=top_k)
     context_parts = []
     for r in results:
         context_parts.append(f"[{r.get('date', '')} | {r.get('subject', '')}]\n{r.get('text', '')}")
@@ -108,3 +126,9 @@ def get_all_chunks_for_week(week: int) -> list[dict]:
     chunks = [m for m in metadata_list if m.get("week") == week]
     chunks.sort(key=lambda x: x.get("date", ""))
     return chunks
+
+
+def get_all_chunks_for_lecture_id(lecture_id: str) -> list[dict]:
+    """Backend ``lecture_id``로 인제스트된 모든 청크를 반환 (학습 가이드 등 전체 맥락용)."""
+    _, metadata_list = _get_vectorstore()
+    return [m for m in metadata_list if m.get("lecture_id") == lecture_id]
